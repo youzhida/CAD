@@ -4,6 +4,7 @@ This folder contains a small AutoLISP command pack for AutoCAD-compatible CAD to
 
 Files:
 - `ys_tools.lsp`: main command file
+- `ys_door_prep.lsp`: sliding-door block prep helper
 
 Commands:
 - `Q`: restyles selected furniture geometry to yellow outer lines + red `__DASH` inner lines
@@ -38,3 +39,10 @@ Current behavior:
 If you want a different cabinet split rule later, change this line in `ys_tools.lsp`:
 
 `(setq *ys-cabinet-target-width* 600.0)`
+
+Door prep helper:
+- Load `ys_door_prep.lsp`
+- Run `YDOORPREP` or `YDP`
+- Select one sliding door made of loose lines / polylines
+- The script creates a normal block, inserts it back, adds a helper layer named `YDOOR_HELP`, and opens `BEDIT`
+- In `BEDIT`, use the center helper line for a horizontal Linear Parameter, then use the two helper rectangles for left/right Stretch actions
