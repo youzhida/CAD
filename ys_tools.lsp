@@ -221,6 +221,11 @@
   (if minpt
     (list minpt maxpt)))
 
+(defun ys:range-overlap-size (a1 a2 b1 b2)
+  (max 0.0
+       (- (min a2 b2)
+          (max a1 b1))))
+
 (defun ys:bbox-rect-points (bbox / pmin pmax)
   (setq pmin (car bbox)
         pmax (cadr bbox))
@@ -767,7 +772,78 @@
     (<= (abs (- (car maxpt) (car total-max))) tol)
     (<= (abs (- (cadr maxpt) (cadr total-max))) tol)))
 
-(defun ys:outer-vla-object-p (obj bbox total-bbox tol / kind minpt maxpt total-min total-max bw bh)
+(defun ys:point-on-bbox-border-p (pt bbox tol / x y minpt maxpt)
+  (if (and pt bbox)
+    (progn
+      (setq x (car pt)
+            y (cadr pt)
+            minpt (car bbox)
+            maxpt (cadr bbox))
+      (or
+        (and (<= (- (cadr minpt) tol) y)
+             (<= y (+ (cadr maxpt) tol))
+             (or (<= (abs (- x (car minpt))) tol)
+                 (<= (abs (- x (car maxpt))) tol)))
+        (and (<= (- (car minpt) tol) x)
+             (<= x (+ (car maxpt) tol))
+             (or (<= (abs (- y (cadr minpt))) tol)
+                 (<= (abs (- y (cadr maxpt))) tol)))))))
+
+(defun ys:line-outer-by-exposure-p (obj bbox bbox-list total-bbox tol / minpt maxpt x y x1 x2 y1 y2 left-seen right-seen above-seen below-seen item other-obj other-bbox overlap startpt endpt)
+  (setq minpt (car bbox)
+        maxpt (cadr bbox))
+  (cond
+    ((<= (ys:bbox-width bbox) tol)
+     (setq x (/ (+ (car minpt) (car maxpt)) 2.0)
+           y1 (cadr minpt)
+           y2 (cadr maxpt))
+     (foreach item bbox-list
+       (setq other-obj (car item)
+             other-bbox (cdr item))
+       (if (/= (vla-get-Handle other-obj) (vla-get-Handle obj))
+         (progn
+           (setq overlap
+                  (ys:range-overlap-size
+                    y1
+                    y2
+                    (cadr (car other-bbox))
+                    (cadr (cadr other-bbox))))
+           (if (> overlap tol)
+             (progn
+               (if (< (car (car other-bbox)) (- x tol))
+                 (setq left-seen T))
+               (if (> (car (cadr other-bbox)) (+ x tol))
+                 (setq right-seen T)))))))
+     (or (not left-seen) (not right-seen)))
+    ((<= (ys:bbox-height bbox) tol)
+     (setq y (/ (+ (cadr minpt) (cadr maxpt)) 2.0)
+           x1 (car minpt)
+           x2 (car maxpt))
+     (foreach item bbox-list
+       (setq other-obj (car item)
+             other-bbox (cdr item))
+       (if (/= (vla-get-Handle other-obj) (vla-get-Handle obj))
+         (progn
+           (setq overlap
+                  (ys:range-overlap-size
+                    x1
+                    x2
+                    (car (car other-bbox))
+                    (car (cadr other-bbox))))
+           (if (> overlap tol)
+             (progn
+               (if (< (cadr (car other-bbox)) (- y tol))
+                 (setq below-seen T))
+               (if (> (cadr (cadr other-bbox)) (+ y tol))
+                 (setq above-seen T)))))))
+     (or (not below-seen) (not above-seen)))
+    (T
+     (setq startpt (vlax-curve-getStartPoint obj)
+           endpt (vlax-curve-getEndPoint obj))
+     (and (ys:point-on-bbox-border-p startpt total-bbox tol)
+          (ys:point-on-bbox-border-p endpt total-bbox tol)))))
+
+(defun ys:outer-vla-object-p (obj bbox bbox-list total-bbox tol / kind minpt maxpt total-min total-max bw bh)
   (setq kind (ys:vla-object-name obj)
         minpt (car bbox)
         maxpt (cadr bbox)
@@ -776,14 +852,15 @@
         bw (ys:bbox-width bbox)
         bh (ys:bbox-height bbox))
   (cond
+    ((= kind "AcDbLine")
+     (or (ys:line-outer-by-exposure-p obj bbox bbox-list total-bbox tol)
+         (ys:outer-bbox-p bbox total-bbox tol)))
     ((<= bw tol)
      (or (<= (abs (- (car minpt) (car total-min))) tol)
          (<= (abs (- (car minpt) (car total-max))) tol)))
     ((<= bh tol)
      (or (<= (abs (- (cadr minpt) (cadr total-min))) tol)
          (<= (abs (- (cadr minpt) (cadr total-max))) tol)))
-    ((= kind "AcDbLine")
-     nil)
     (T
      (ys:outer-bbox-p bbox total-bbox tol))))
 
@@ -841,7 +918,7 @@
       (foreach item bbox-list
         (setq obj (car item)
               bbox (cdr item))
-        (if (ys:outer-vla-object-p obj bbox total-bbox tol)
+        (if (ys:outer-vla-object-p obj bbox bbox-list total-bbox tol)
           (ys:style-outer-vla-object obj)
           (ys:style-inner-vla-object obj total-bbox))
         (setq changed (1+ (if changed changed 0))))
@@ -904,6 +981,18 @@
     (+ (if changed changed 0)
        (ys:style-vla-objects-as-furniture (reverse objs)))
     (if skipped skipped 0)))
+
+(defun ys:purge-document (doc / result pass)
+  (setq pass 0)
+  (while (< pass 4)
+    (setq result (vl-catch-all-apply 'vla-PurgeAll (list doc))
+          pass (1+ pass))
+    (if (vl-catch-all-error-p result)
+      (setq pass 4)))
+  (if (vl-catch-all-error-p result)
+    nil
+    T))
+
 (defun c:R (/ *error* olderr doc ename data count)
   (setq doc (vla-get-ActiveDocument (vlax-get-acad-object))
         olderr *error*)
@@ -964,7 +1053,7 @@
   (setq *error* olderr)
   (princ))
 
-(defun c:P (/ *error* olderr doc)
+(defun c:P (/ *error* olderr doc removed-p purged-p)
   (setq doc (vla-get-ActiveDocument (vlax-get-acad-object))
         olderr *error*)
   (defun *error* (msg)
@@ -977,8 +1066,19 @@
   (if (dictsearch (namedobjdict) "ACAD_DGNLINESTYLECOMP")
     (progn
       (dictremove (namedobjdict) "ACAD_DGNLINESTYLECOMP")
-      (princ "\nACAD_DGNLINESTYLECOMP removed."))
-    (princ "\nACAD_DGNLINESTYLECOMP not found."))
+      (setq removed-p T))
+    (setq removed-p nil))
+  (setq purged-p (ys:purge-document doc))
+  (ys:regen doc)
+  (princ
+    (strcat
+      "\nCleanup finished. "
+      (if removed-p
+        "ACAD_DGNLINESTYLECOMP removed. "
+        "ACAD_DGNLINESTYLECOMP not found. ")
+      (if purged-p
+        "PURGE ALL applied."
+        "PURGE ALL unavailable in this CAD.")))
   (ys:end-undo doc)
   (setq *error* olderr)
   (princ))
