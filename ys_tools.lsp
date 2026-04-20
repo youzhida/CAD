@@ -6,7 +6,7 @@
       *ys-geom-tol* 1.0
       *ys-furniture-outer-color* 2
       *ys-furniture-inner-color* 1
-      *ys-furniture-inner-linetype* "HIDDEN")
+      *ys-furniture-inner-linetype* "DASHED")
 
 (defun ys:3dpt (pt)
   (list
@@ -199,6 +199,9 @@
 (defun ys:bbox-height (bbox)
   (- (cadr (cadr bbox)) (cadr (car bbox))))
 
+(defun ys:bbox-maxdim (bbox)
+  (max (ys:bbox-width bbox) (ys:bbox-height bbox)))
+
 (defun ys:bbox-from-points (pts / minpt maxpt)
   (foreach pt pts
     (if minpt
@@ -260,6 +263,31 @@
       (if color (vla-put-Color obj color))
       (if linetype (vla-put-Linetype obj linetype)))))
 
+(defun ys:inner-linetype-scale (bbox / size)
+  (setq size (if bbox (ys:bbox-maxdim bbox) 0.0))
+  (max 1.0 (* 0.02 size)))
+
+(defun ys:style-inner-vla-object (obj bbox / inner-ltype)
+  (setq inner-ltype (ys:resolve-inner-linetype))
+  (ys:set-vla-style obj *ys-furniture-inner-color* inner-ltype)
+  (if (and obj (vlax-property-available-p obj 'LinetypeScale))
+    (vla-put-LinetypeScale obj (ys:inner-linetype-scale bbox)))
+  (if (and obj (vlax-property-available-p obj 'LinetypeGeneration))
+    (vla-put-LinetypeGeneration obj :vlax-true)))
+
+(defun ys:style-outer-vla-object (obj)
+  (ys:set-vla-style obj *ys-furniture-outer-color* "Continuous")
+  (if (and obj (vlax-property-available-p obj 'LinetypeScale))
+    (vla-put-LinetypeScale obj 1.0)))
+
+(defun ys:style-inner-entity (ename bbox / obj)
+  (if (and ename (setq obj (vlax-ename->vla-object ename)))
+    (ys:style-inner-vla-object obj bbox)))
+
+(defun ys:style-outer-entity (ename / obj)
+  (if (and ename (setq obj (vlax-ename->vla-object ename)))
+    (ys:style-outer-vla-object obj)))
+
 (defun ys:set-entity-style (ename color linetype / obj)
   (if (and ename (setq obj (vlax-ename->vla-object ename)))
     (ys:set-vla-style obj color linetype)))
@@ -280,9 +308,9 @@
      *ys-furniture-inner-linetype*)
     ((setq name (ys:ensure-linetype *ys-furniture-inner-linetype*))
      name)
-    ((setq name (ys:ensure-linetype "HIDDEN"))
-     name)
     ((setq name (ys:ensure-linetype "DASHED"))
+     name)
+    ((setq name (ys:ensure-linetype "HIDDEN"))
      name)
     (T "Continuous")))
 
@@ -496,54 +524,50 @@
       (if (not (member nil intersections))
         intersections))))
 
-(defun ys:step-boundaries (span step / result dist need-panels idx actual-step)
+(defun ys:step-boundaries (span step / result panel-count idx actual-step)
   (setq span (abs span)
         step (max 1.0 step))
   (cond
     ((<= span 1e-6)
      (list 0.0))
     (T
-     (setq need-panels (1+ (fix (/ (max 0.0 (- span 1e-6)) step))))
-     (if (> need-panels *ys-cabinet-max-panels*)
-       (progn
-         (setq idx 0
-               actual-step (/ span *ys-cabinet-max-panels*))
-         (while (<= idx *ys-cabinet-max-panels*)
-           (setq result (append result (list (* idx actual-step)))
-                 idx (1+ idx)))
-         result)
-       (progn
-         (setq result (list 0.0)
-               dist step)
-         (while (< dist span)
-           (setq result (append result (list dist))
-                 dist (+ dist step)))
-         (append result (list span)))))))
+     (setq panel-count (max 1 (fix (+ (/ span step) 0.5))))
+     (if (> panel-count *ys-cabinet-max-panels*)
+       (setq panel-count *ys-cabinet-max-panels*))
+     (setq idx 0
+           actual-step (/ span panel-count))
+     (while (<= idx panel-count)
+       (setq result (append result (list (* idx actual-step)))
+             idx (1+ idx)))
+     result)))
 
-(defun ys:offset-inward-ename (ename inset / obj original-area result objs best best-area item area)
+(defun ys:offset-inward-ename (ename inset / obj original-area result objs best best-area item area dist)
   (if (and ename (> inset 0.0))
     (progn
       (setq obj (vlax-ename->vla-object ename)
-            original-area (vla-get-area obj)
-            result (vl-catch-all-apply 'vla-Offset (list obj (- inset))))
-      (if (vl-catch-all-error-p result)
-        nil
+            original-area (if (vlax-property-available-p obj 'Area)
+                            (abs (vla-get-Area obj))))
+      (if original-area
         (progn
-          (setq objs (ys:variant-object-list result))
-          (foreach item objs
-            (if (vlax-property-available-p item 'Area)
+          (foreach dist (list (- inset) inset)
+            (setq result (vl-catch-all-apply 'vla-Offset (list obj dist)))
+            (if (not (vl-catch-all-error-p result))
               (progn
-                (setq area (abs (vla-get-Area item)))
-                (if (and (< area original-area)
-                         (or (not best-area) (> area best-area)))
-                  (setq best item
-                        best-area area)))))
+                (setq objs (ys:variant-object-list result))
+                (foreach item objs
+                  (if (vlax-property-available-p item 'Area)
+                    (progn
+                      (setq area (abs (vla-get-Area item)))
+                      (if (and (< area original-area)
+                               (or (not best-area) (> area best-area)))
+                        (setq best item
+                              best-area area)))))
+                (foreach item objs
+                  (if (or (not best)
+                          (/= (vla-get-Handle item) (vla-get-Handle best)))
+                    (vla-Delete item))))))
           (if best
-            (progn
-              (foreach item objs
-                (if (/= (vla-get-Handle item) (vla-get-Handle best))
-                  (vla-Delete item)))
-              (vlax-vla-object->ename best))))))))
+            (vlax-vla-object->ename best)))))))
 
 (defun ys:straight-cabinet-data (ename / bbox width height span depth layer rect kind)
   (if (and (ys:polyline-entity-p ename)
@@ -572,7 +596,7 @@
           (cons 'span span)
           (cons 'depth depth))))))
 
-(defun ys:draw-straight-cabinet (ename data / kind layer rect orientation inset inner-ltype inner-pts inner-bbox inner-ename pmin pmax span boundaries count idx d0 d1 x0 x1 y0 y1)
+(defun ys:draw-straight-cabinet (ename data / kind layer rect orientation inset inner-ltype inner-pts inner-bbox inner-ename inner-outline-ename pmin pmax span boundaries count idx d0 d1 x0 x1 y0 y1 segment-ename)
   (setq kind (cdr (assoc 'kind data))
         layer (cdr (assoc 'layer data))
         rect (cdr (assoc 'rect data))
@@ -586,20 +610,22 @@
             (if (> inset 0.0)
               (ys:inset-rectangle-points (cdr (assoc 'pts rect)) inset)
               (cdr (assoc 'pts rect))))
-     (if inner-pts
-       (progn
-         (ys:make-lwpolyline layer inner-pts *ys-furniture-inner-color* inner-ltype)
-         (setq inner-bbox (ys:bbox-from-points inner-pts)))))
+      (if inner-pts
+        (progn
+          (setq inner-outline-ename
+                 (ys:make-lwpolyline layer inner-pts *ys-furniture-inner-color* inner-ltype)
+                inner-bbox (ys:bbox-from-points inner-pts))
+          (ys:style-inner-entity inner-outline-ename inner-bbox))))
     ((eq kind 'rounded)
-     (if (> inset 0.0)
-       (setq inner-ename (ys:offset-inward-ename ename inset))
-       (setq inner-bbox (cdr (assoc 'bbox data))))
-     (cond
-       (inner-ename
-        (ys:set-entity-style inner-ename *ys-furniture-inner-color* inner-ltype)
-        (setq inner-bbox (ys:entity-bbox inner-ename)))
-       ((<= inset 0.0)
-        inner-bbox))))
+      (if (> inset 0.0)
+        (setq inner-ename (ys:offset-inward-ename ename inset))
+        (setq inner-bbox (cdr (assoc 'bbox data))))
+      (cond
+        (inner-ename
+         (setq inner-bbox (ys:entity-bbox inner-ename))
+         (ys:style-inner-entity inner-ename inner-bbox))
+        ((<= inset 0.0)
+         inner-bbox))))
   (if inner-bbox
     (progn
       (setq pmin (car inner-bbox)
@@ -616,18 +642,21 @@
       (setq idx 1)
       (while (< idx count)
         (if (eq 'horizontal orientation)
-          (ys:make-line
-            layer
-            (list (+ x0 (nth idx boundaries)) y0 0.0)
-            (list (+ x0 (nth idx boundaries)) y1 0.0)
-            *ys-furniture-inner-color*
-            inner-ltype)
-          (ys:make-line
-            layer
-            (list x0 (+ y0 (nth idx boundaries)) 0.0)
-            (list x1 (+ y0 (nth idx boundaries)) 0.0)
-            *ys-furniture-inner-color*
-            inner-ltype))
+          (setq segment-ename
+                 (ys:make-line
+                   layer
+                   (list (+ x0 (nth idx boundaries)) y0 0.0)
+                   (list (+ x0 (nth idx boundaries)) y1 0.0)
+                   *ys-furniture-inner-color*
+                   inner-ltype))
+          (setq segment-ename
+                 (ys:make-line
+                   layer
+                   (list x0 (+ y0 (nth idx boundaries)) 0.0)
+                   (list x1 (+ y0 (nth idx boundaries)) 0.0)
+                   *ys-furniture-inner-color*
+                   inner-ltype)))
+        (ys:style-inner-entity segment-ename inner-bbox)
         (setq idx (1+ idx)))
       (setq idx 0)
       (while (< idx count)
@@ -635,31 +664,39 @@
               d1 (nth (1+ idx) boundaries))
         (if (eq 'horizontal orientation)
           (progn
-            (ys:make-line
-              layer
-              (list (+ x0 d0) y0 0.0)
-              (list (+ x0 d1) y1 0.0)
-              *ys-furniture-inner-color*
-              inner-ltype)
-            (ys:make-line
-              layer
-              (list (+ x0 d0) y1 0.0)
-              (list (+ x0 d1) y0 0.0)
-              *ys-furniture-inner-color*
-              inner-ltype))
+            (setq segment-ename
+                   (ys:make-line
+                     layer
+                     (list (+ x0 d0) y0 0.0)
+                     (list (+ x0 d1) y1 0.0)
+                     *ys-furniture-inner-color*
+                     inner-ltype))
+            (ys:style-inner-entity segment-ename inner-bbox)
+            (setq segment-ename
+                   (ys:make-line
+                     layer
+                     (list (+ x0 d0) y1 0.0)
+                     (list (+ x0 d1) y0 0.0)
+                     *ys-furniture-inner-color*
+                     inner-ltype))
+            (ys:style-inner-entity segment-ename inner-bbox))
           (progn
-            (ys:make-line
-              layer
-              (list x0 (+ y0 d0) 0.0)
-              (list x1 (+ y0 d1) 0.0)
-              *ys-furniture-inner-color*
-              inner-ltype)
-            (ys:make-line
-              layer
-              (list x1 (+ y0 d0) 0.0)
-              (list x0 (+ y0 d1) 0.0)
-              *ys-furniture-inner-color*
-              inner-ltype)))
+            (setq segment-ename
+                   (ys:make-line
+                     layer
+                     (list x0 (+ y0 d0) 0.0)
+                     (list x1 (+ y0 d1) 0.0)
+                     *ys-furniture-inner-color*
+                     inner-ltype))
+            (ys:style-inner-entity segment-ename inner-bbox)
+            (setq segment-ename
+                   (ys:make-line
+                     layer
+                     (list x1 (+ y0 d0) 0.0)
+                     (list x0 (+ y0 d1) 0.0)
+                     *ys-furniture-inner-color*
+                     inner-ltype))
+            (ys:style-inner-entity segment-ename inner-bbox)))
         (setq idx (1+ idx)))
       count)))
 (defun ys:append-unique-string (vals item / key exists)
@@ -730,6 +767,26 @@
     (<= (abs (- (car maxpt) (car total-max))) tol)
     (<= (abs (- (cadr maxpt) (cadr total-max))) tol)))
 
+(defun ys:outer-vla-object-p (obj bbox total-bbox tol / kind minpt maxpt total-min total-max bw bh)
+  (setq kind (ys:vla-object-name obj)
+        minpt (car bbox)
+        maxpt (cadr bbox)
+        total-min (car total-bbox)
+        total-max (cadr total-bbox)
+        bw (ys:bbox-width bbox)
+        bh (ys:bbox-height bbox))
+  (cond
+    ((<= bw tol)
+     (or (<= (abs (- (car minpt) (car total-min))) tol)
+         (<= (abs (- (car minpt) (car total-max))) tol)))
+    ((<= bh tol)
+     (or (<= (abs (- (cadr minpt) (cadr total-min))) tol)
+         (<= (abs (- (cadr minpt) (cadr total-max))) tol)))
+    ((= kind "AcDbLine")
+     nil)
+    (T
+     (ys:outer-bbox-p bbox total-bbox tol))))
+
 (defun ys:group-objs-by-bbox (objs / pairs bbox groups seed group groupbbox added item next tol)
   (foreach obj objs
     (if (setq bbox (ys:vla-bbox obj))
@@ -755,8 +812,7 @@
     (setq groups (append groups (list group))))
   groups)
 
-(defun ys:style-vla-objects-by-bbox (objs / inner-ltype bbox-list item obj bbox total-bbox minpt maxpt total-min total-max tol changed)
-  (setq inner-ltype (ys:resolve-inner-linetype))
+(defun ys:style-vla-objects-by-bbox (objs / bbox-list item obj bbox total-bbox minpt maxpt total-min total-max tol changed)
   (foreach obj objs
     (if (and (ys:vla-curve-object-p obj)
              (setq bbox (ys:vla-bbox obj)))
@@ -781,16 +837,13 @@
                   (max (cadr total-max) (cadr maxpt))
                   (max (caddr total-max) (caddr maxpt)))))
       (setq total-bbox (list total-min total-max)
-            tol (max 1.0
-                     (* 0.08
-                        (max (ys:bbox-width total-bbox)
-                             (ys:bbox-height total-bbox)))))
+            tol (max 1.0 *ys-geom-tol*))
       (foreach item bbox-list
         (setq obj (car item)
               bbox (cdr item))
-        (if (ys:outer-bbox-p bbox total-bbox tol)
-          (ys:set-vla-style obj *ys-furniture-outer-color* "Continuous")
-          (ys:set-vla-style obj *ys-furniture-inner-color* inner-ltype))
+        (if (ys:outer-vla-object-p obj bbox total-bbox tol)
+          (ys:style-outer-vla-object obj)
+          (ys:style-inner-vla-object obj total-bbox))
         (setq changed (1+ (if changed changed 0))))
       changed)
     0))
@@ -867,13 +920,13 @@
      (princ "\nNothing selected."))
     ((not (setq data (ys:straight-cabinet-data ename)))
      (princ "\nPlease select a closed straight cabinet polyline (rectangle or rounded-end)."))
-    ((not (setq count (ys:draw-straight-cabinet ename data)))
-     (princ "\nFailed to generate cabinet layout."))
-    (T
-     (ys:set-entity-style ename *ys-furniture-outer-color* "Continuous")
-     (princ
-       (strcat
-         "\nCabinet layout created. Panels: "
+     ((not (setq count (ys:draw-straight-cabinet ename data)))
+      (princ "\nFailed to generate cabinet layout."))
+     (T
+      (ys:style-outer-entity ename)
+      (princ
+        (strcat
+          "\nCabinet layout created. Panels: "
          (itoa count)
          ". Step = "
          (rtos *ys-cabinet-target-width* 2 2)))))

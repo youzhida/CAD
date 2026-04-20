@@ -22,7 +22,7 @@ Current behavior:
 - `R` supports ordinary right-angle rectangles
 - `R` also supports straight rounded-end / half-arc cabinet outlines
 - `R` does not support L-shaped cabinets
-- `R` uses a target panel width of `600.0`
+- `R` uses a target panel width of `600.0`, then evenly splits the full span to the nearest panel count
 - `R` offsets inward by `30.0` by default
 - `Q` uses grouped bounding-box classification to keep open outer perimeter lines yellow
 - `Q` styles direct geometry and editable block definitions, but does not explode selected blocks
@@ -30,7 +30,7 @@ Current behavior:
 - `B` creates a block name like `YS_BLK_20260420153045`
 - Default outer color is yellow (`2`)
 - Default inner color is red (`1`)
-- Default inner linetype is `HIDDEN`
+- Default inner linetype is `DASHED`
 
 If you want a different cabinet split rule later, change this line in `ys_tools.lsp`:
 
