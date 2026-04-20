@@ -6,7 +6,10 @@
       *ys-geom-tol* 1.0
       *ys-furniture-outer-color* 2
       *ys-furniture-inner-color* 1
-      *ys-furniture-inner-linetype* "DASHED")
+      *ys-furniture-inner-linetype* "__DASH"
+      *ys-furniture-inner-ltscale* 1.0
+      *ys-global-ltscale* 400.0
+      *ys-custom-linetype-file* "F:/ys/cad_plugin/ys_tools.lin")
 
 (defun ys:3dpt (pt)
   (list
@@ -268,9 +271,8 @@
       (if color (vla-put-Color obj color))
       (if linetype (vla-put-Linetype obj linetype)))))
 
-(defun ys:inner-linetype-scale (bbox / size)
-  (setq size (if bbox (ys:bbox-maxdim bbox) 0.0))
-  (max 1.0 (* 0.02 size)))
+(defun ys:inner-linetype-scale (bbox)
+  *ys-furniture-inner-ltscale*)
 
 (defun ys:style-inner-vla-object (obj bbox / inner-ltype)
   (setq inner-ltype (ys:resolve-inner-linetype))
@@ -301,9 +303,14 @@
   (if (tblsearch "LTYPE" name)
     name
     (progn
-      (foreach file '("acad.lin" "acadiso.lin")
+      (foreach file
+               (list
+                 (findfile "ys_tools.lin")
+                 *ys-custom-linetype-file*
+                 "acad.lin"
+                 "acadiso.lin")
         (if (not (tblsearch "LTYPE" name))
-          (vl-cmdf "._-LINETYPE" "_Load" name file)))
+          (vl-catch-all-apply 'vl-cmdf (list "._-LINETYPE" "_Load" name file))))
       (if (tblsearch "LTYPE" name)
         name))))
 
@@ -313,11 +320,17 @@
      *ys-furniture-inner-linetype*)
     ((setq name (ys:ensure-linetype *ys-furniture-inner-linetype*))
      name)
+    ((setq name (ys:ensure-linetype "__DASH"))
+     name)
     ((setq name (ys:ensure-linetype "DASHED"))
      name)
     ((setq name (ys:ensure-linetype "HIDDEN"))
      name)
     (T "Continuous")))
+
+(defun ys:apply-linetype-standards ()
+  (setvar "LTSCALE" *ys-global-ltscale*)
+  (ys:resolve-inner-linetype))
 
 (defun ys:make-line (layer p1 p2 color linetype / ename)
   (setq ename
@@ -999,10 +1012,11 @@
   (defun *error* (msg)
     (ys:end-undo doc)
     (setq *error* olderr)
-    (if (and msg (not (wcmatch (strcase msg) "*BREAK,*CANCEL*,*EXIT*")))
-      (princ (strcat "\nError: " msg)))
-    (princ))
+     (if (and msg (not (wcmatch (strcase msg) "*BREAK,*CANCEL*,*EXIT*")))
+       (princ (strcat "\nError: " msg)))
+     (princ))
   (vla-StartUndoMark doc)
+  (ys:apply-linetype-standards)
   (setq ename (ys:entity-or-prompt "\nSelect a closed straight cabinet polyline: "))
   (cond
     ((not ename)
@@ -1029,10 +1043,11 @@
   (defun *error* (msg)
     (ys:end-undo doc)
     (setq *error* olderr)
-    (if (and msg (not (wcmatch (strcase msg) "*BREAK,*CANCEL*,*EXIT*")))
-      (princ (strcat "\nError: " msg)))
-    (princ))
+     (if (and msg (not (wcmatch (strcase msg) "*BREAK,*CANCEL*,*EXIT*")))
+       (princ (strcat "\nError: " msg)))
+     (princ))
   (vla-StartUndoMark doc)
+  (ys:apply-linetype-standards)
   (setq ss (ys:ss-or-prompt "\nSelect furniture geometry to restyle: "))
   (cond
     ((not ss)
