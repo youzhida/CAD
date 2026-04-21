@@ -42,11 +42,11 @@ If you want a different cabinet split rule later, change this line in `ys_tools.
 
 Room width helper:
 - Load `ys_room_width.lsp`
-- Run `YKJ` or `YROOMW`
-- The script uses the current selection, or the whole drawing if nothing is selected
-- It filters to white wall `LINE` / `LWPOLYLINE` / `POLYLINE` objects
-- It places the first dimension row from the outermost wall line on each side
-- It looks for the nearest inner parallel row within the wall-thickness threshold and only pairs wall faces inside each row span
-- Wall-body pairing is limited by `*ysrw-max-wall-thickness*` in `ys_room_width.lsp`
-- The first dimension row is offset `700` from the exterior wall, and the overall dimension row is another `700` farther out
+- Run `YJK`, `YKJ`, or `YROOMW`
+- First select the current suite geometry, then press Enter
+- The script builds one virtual outer frame from the selected geometry's outermost extents and keeps it in memory only
+- Pick one side's chain break points manually, then press Enter to create that side's first-row and overall dimensions
+- Repeat for other sides if needed; pressing Enter immediately finishes the command
+- The first dimension row is offset `900` from the matching side of the virtual frame
+- The overall dimension row is another `700` farther out
 - It uses the current dimstyle and current layer
