@@ -1,61 +1,19 @@
 (vl-load-com)
 
 (setq *ysrw-geom-tol* 1.0
-      *ysrw-min-room-width* 1200.0
-      *ysrw-min-room-height* 1200.0
-      *ysrw-min-room-area* 1000000.0
-      *ysrw-max-room-area-ratio* 0.35
-      *ysrw-dim-offset-min* 120.0
-      *ysrw-dim-offset-max* 300.0
-      *ysrw-bbox-key-tol* 5.0)
+      *ysrw-row-tol* 5.0
+      *ysrw-side-dim-offset* 700.0
+      *ysrw-total-dim-gap* 700.0
+      *ysrw-max-wall-thickness* 1200.0
+      *ysrw-green-aci* 3
+      *ysrw-white-aci* 7
+      *ysrw-white-truecolor* 16777215)
 
 (defun ysrw:3dpt (pt)
   (list
     (float (car pt))
     (float (cadr pt))
     (float (if (caddr pt) (caddr pt) 0.0))))
-
-(defun ysrw:vector (p1 p2)
-  (mapcar '- (ysrw:3dpt p2) (ysrw:3dpt p1)))
-
-(defun ysrw:length (v)
-  (distance '(0.0 0.0 0.0) v))
-
-(defun ysrw:cross2d (a b)
-  (- (* (car a) (cadr b))
-     (* (cadr a) (car b))))
-
-(defun ysrw:axis-aligned-segment-p (p1 p2)
-  (or (<= (abs (- (car p1) (car p2))) *ysrw-geom-tol*)
-      (<= (abs (- (cadr p1) (cadr p2))) *ysrw-geom-tol*)))
-
-(defun ysrw:collinear-3pt-p (p1 p2 p3 / v1 v2)
-  (setq v1 (ysrw:vector p1 p2)
-        v2 (ysrw:vector p2 p3))
-  (and (<= (abs (ysrw:cross2d v1 v2))
-           (max 1e-6 (* *ysrw-geom-tol* (max (ysrw:length v1) (ysrw:length v2) 1.0))))
-       (ysrw:axis-aligned-segment-p p1 p2)
-       (ysrw:axis-aligned-segment-p p2 p3)))
-
-(defun ysrw:simplify-closed-pts-once (pts / len idx prev curr next result)
-  (setq len (length pts)
-        idx 0)
-  (while (< idx len)
-    (setq prev (nth (if (= idx 0) (1- len) (1- idx)) pts)
-          curr (nth idx pts)
-          next (nth (rem (1+ idx) len) pts))
-    (if (not (ysrw:collinear-3pt-p prev curr next))
-      (setq result (cons curr result)))
-    (setq idx (1+ idx)))
-  (reverse result))
-
-(defun ysrw:simplify-closed-pts (pts / prev cur)
-  (setq prev nil
-        cur pts)
-  (while (not (equal prev cur 1e-6))
-    (setq prev cur
-          cur (ysrw:simplify-closed-pts-once cur)))
-  cur)
 
 (defun ysrw:ss-all-or-implied (filter / ss)
   (cond
@@ -141,15 +99,6 @@
         (vlax-safearray->list pmin)
         (vlax-safearray->list pmax)))))
 
-(defun ysrw:bbox-width (bbox)
-  (- (car (cadr bbox)) (car (car bbox))))
-
-(defun ysrw:bbox-height (bbox)
-  (- (cadr (cadr bbox)) (cadr (car bbox))))
-
-(defun ysrw:bbox-area (bbox)
-  (* (ysrw:bbox-width bbox) (ysrw:bbox-height bbox)))
-
 (defun ysrw:bbox-union (bbox1 bbox2)
   (list
     (list
@@ -161,174 +110,744 @@
       (max (cadr (cadr bbox1)) (cadr (cadr bbox2)))
       (max (caddr (cadr bbox1)) (caddr (cadr bbox2))))))
 
-(defun ysrw:polygon-area2 (pts / total idx p1 p2)
-  (setq total 0.0
-        idx 0)
-  (while (< idx (length pts))
-    (setq p1 (nth idx pts)
-          p2 (nth (rem (1+ idx) (length pts)) pts)
-          total (+ total
-                   (- (* (car p1) (cadr p2))
-                      (* (cadr p1) (car p2)))))
-    (setq idx (1+ idx)))
-  total)
+(defun ysrw:entity-layer (ename / data)
+  (if (setq data (entget ename))
+    (cdr (assoc 8 data))))
 
-(defun ysrw:orthogonal-pts-p (pts / ok idx)
-  (setq ok T
-        idx 0)
-  (while (and ok (< idx (length pts)))
-    (if (not (ysrw:axis-aligned-segment-p
-               (nth idx pts)
-               (nth (rem (1+ idx) (length pts)) pts)))
-      (setq ok nil))
-    (setq idx (1+ idx)))
-  ok)
+(defun ysrw:entity-truecolor (ename / data item)
+  (setq data (entget ename)
+        item (assoc 420 data))
+  (if item
+    (cdr item)))
 
-(defun ysrw:round-key (value step)
-  (* step (fix (+ 0.5 (/ value step)))))
+(defun ysrw:layer-truecolor (layer / data item)
+  (setq data (tblsearch "LAYER" layer)
+        item (if data (assoc 420 data)))
+  (if item
+    (cdr item)))
 
-(defun ysrw:bbox-key (bbox)
-  (strcat
-    (rtos (ysrw:round-key (car (car bbox)) *ysrw-bbox-key-tol*) 2 3) ","
-    (rtos (ysrw:round-key (cadr (car bbox)) *ysrw-bbox-key-tol*) 2 3) ","
-    (rtos (ysrw:round-key (car (cadr bbox)) *ysrw-bbox-key-tol*) 2 3) ","
-    (rtos (ysrw:round-key (cadr (cadr bbox)) *ysrw-bbox-key-tol*) 2 3)))
+(defun ysrw:layer-aci-color (layer / data item)
+  (setq data (tblsearch "LAYER" layer)
+        item (if data (assoc 62 data)))
+  (if item
+    (abs (cdr item))))
 
-(defun ysrw:append-unique-key (vals key)
-  (if (member key vals)
-    vals
-    (cons key vals)))
+(defun ysrw:entity-aci-color (ename / data item layer)
+  (setq data (entget ename)
+        item (assoc 62 data)
+        layer (ysrw:entity-layer ename))
+  (cond
+    ((and item (not (member (abs (cdr item)) '(0 256))))
+     (abs (cdr item)))
+    (layer
+     (ysrw:layer-aci-color layer))))
 
-(defun ysrw:room-data-from-ename (ename / pts bbox width height area key)
-  (if (and (ysrw:polyline-entity-p ename)
-           (ysrw:polyline-closed-p ename)
-           (not (ysrw:polyline-has-bulge-p ename)))
+(defun ysrw:white-wall-p (ename / layer truecolor aci)
+  (setq layer (ysrw:entity-layer ename)
+        truecolor (or (ysrw:entity-truecolor ename)
+                      (if layer (ysrw:layer-truecolor layer)))
+        aci (ysrw:entity-aci-color ename))
+  (or (= truecolor *ysrw-white-truecolor*)
+      (= aci *ysrw-white-aci*)))
+
+(defun ysrw:wall-candidate-p (ename / aci)
+  (setq aci (ysrw:entity-aci-color ename))
+  (or (ysrw:white-wall-p ename)
+      (= aci *ysrw-green-aci*)))
+
+(defun ysrw:axis-aligned-segment-p (p1 p2)
+  (or (<= (abs (- (car p1) (car p2))) *ysrw-geom-tol*)
+      (<= (abs (- (cadr p1) (cadr p2))) *ysrw-geom-tol*)))
+
+(defun ysrw:make-segment (p1 p2 / x y)
+  (cond
+    ((<= (abs (- (car p1) (car p2))) *ysrw-geom-tol*)
+     (setq x (/ (+ (car p1) (car p2)) 2.0))
+     (list 'vertical x (min (cadr p1) (cadr p2)) (max (cadr p1) (cadr p2))))
+    ((<= (abs (- (cadr p1) (cadr p2))) *ysrw-geom-tol*)
+     (setq y (/ (+ (cadr p1) (cadr p2)) 2.0))
+     (list 'horizontal y (min (car p1) (car p2)) (max (car p1) (car p2))))))
+
+(defun ysrw:line-segments (ename / data p1 p2 seg)
+  (setq data (entget ename)
+        p1 (ysrw:3dpt (cdr (assoc 10 data)))
+        p2 (ysrw:3dpt (cdr (assoc 11 data)))
+        seg (ysrw:make-segment p1 p2))
+  (if seg
+    (list seg)))
+
+(defun ysrw:polyline-segments (ename / pts closed len idx p1 p2 seg result)
+  (if (not (ysrw:polyline-has-bulge-p ename))
     (progn
-      (setq pts (ysrw:simplify-closed-pts (ysrw:polyline-vertices ename))
-            bbox (ysrw:entity-bbox ename))
-      (if (and pts
-               bbox
-               (>= (length pts) 4)
-               (ysrw:orthogonal-pts-p pts))
-        (progn
-          (setq width (ysrw:bbox-width bbox)
-                height (ysrw:bbox-height bbox)
-                area (/ (abs (ysrw:polygon-area2 pts)) 2.0)
-                key (ysrw:bbox-key bbox))
-          (list
-            (cons 'ename ename)
-            (cons 'pts pts)
-            (cons 'bbox bbox)
-            (cons 'key key)
-            (cons 'width width)
-            (cons 'height height)
-            (cons 'area area)))))))
+      (setq pts (ysrw:polyline-vertices ename)
+            closed (ysrw:polyline-closed-p ename)
+            len (length pts)
+            idx 0)
+      (while (< idx (if closed len (1- len)))
+        (setq p1 (nth idx pts)
+              p2 (nth (rem (1+ idx) len) pts)
+              seg (ysrw:make-segment p1 p2))
+        (if seg
+          (setq result (cons seg result)))
+        (setq idx (1+ idx)))
+      (reverse result))))
 
-(defun ysrw:bbox-strictly-contains-p (outer inner / omin omax imin imax)
-  (setq omin (car outer)
-        omax (cadr outer)
-        imin (car inner)
-        imax (cadr inner))
-  (and (< (car omin) (- (car imin) *ysrw-geom-tol*))
-       (< (cadr omin) (- (cadr imin) *ysrw-geom-tol*))
-       (> (car omax) (+ (car imax) *ysrw-geom-tol*))
-       (> (cadr omax) (+ (cadr imax) *ysrw-geom-tol*))))
+(defun ysrw:entity-segments (ename / kind)
+  (setq kind (ysrw:entity-type ename))
+  (cond
+    ((= "LINE" kind) (ysrw:line-segments ename))
+    ((ysrw:polyline-entity-p ename) (ysrw:polyline-segments ename))))
 
-(defun ysrw:room-sized-p (room total-area)
-  (and room
-       (>= (cdr (assoc 'width room)) *ysrw-min-room-width*)
-       (>= (cdr (assoc 'height room)) *ysrw-min-room-height*)
-       (>= (cdr (assoc 'area room)) *ysrw-min-room-area*)
-       (or (not total-area)
-           (<= (cdr (assoc 'area room)) (* total-area *ysrw-max-room-area-ratio*)))))
-
-(defun ysrw:contains-large-subrooms-p (room rooms / count other)
-  (setq count 0)
-  (foreach other rooms
-    (if (and (/= (cdr (assoc 'key room)) (cdr (assoc 'key other)))
-             (ysrw:bbox-strictly-contains-p
-               (cdr (assoc 'bbox room))
-               (cdr (assoc 'bbox other)))
-             (>= (cdr (assoc 'area other)) *ysrw-min-room-area*)
-             (< (cdr (assoc 'area other)) (* (cdr (assoc 'area room)) 0.9)))
-      (setq count (1+ count))))
-  (>= count 2))
-
-(defun ysrw:dedupe-rooms (rooms / seen result key)
-  (foreach room rooms
-    (setq key (cdr (assoc 'key room)))
-    (if (not (member key seen))
-      (progn
-        (setq seen (cons key seen))
-        (setq result (cons room result)))))
-  (reverse result))
-
-(defun ysrw:collect-room-candidates (/ ss enames rooms bbox total-bbox total-area room)
-  (setq ss (ysrw:ss-all-or-implied '((0 . "LWPOLYLINE,POLYLINE"))))
+(defun ysrw:collect-wall-data (/ ss enames ename bbox total-bbox segments ref-segments entity-segments count ref-count)
+  (setq ss (ysrw:ss-all-or-implied '((0 . "LINE,LWPOLYLINE,POLYLINE"))))
   (if ss
     (progn
       (setq enames (ysrw:ss->enames ss))
       (foreach ename enames
-        (if (setq room (ysrw:room-data-from-ename ename))
+        (if (and (ysrw:wall-candidate-p ename)
+                 (setq bbox (ysrw:entity-bbox ename))
+                 (setq entity-segments (ysrw:entity-segments ename)))
           (progn
-            (setq rooms (cons room rooms))
-            (if total-bbox
-              (setq total-bbox (ysrw:bbox-union total-bbox (cdr (assoc 'bbox room))))
-              (setq total-bbox (cdr (assoc 'bbox room)))))))
-      (setq rooms (ysrw:dedupe-rooms (reverse rooms))
-            total-area (if total-bbox (ysrw:bbox-area total-bbox)))
-      (foreach room rooms
-        (if (and (ysrw:room-sized-p room total-area)
-                 (not (ysrw:contains-large-subrooms-p room rooms)))
-          (setq bbox (cons room bbox))))
-      (reverse bbox))))
+            (setq count (1+ (if count count 0))
+                  total-bbox (if total-bbox
+                               (ysrw:bbox-union total-bbox bbox)
+                               bbox)
+                  segments (append segments entity-segments))
+            (if (ysrw:white-wall-p ename)
+              (setq ref-count (1+ (if ref-count ref-count 0))
+                    ref-segments (append ref-segments entity-segments))))))
+      (if total-bbox
+        (list
+          (cons 'bbox total-bbox)
+          (cons 'segments segments)
+          (cons 'ref-segments ref-segments)
+          (cons 'count count)
+          (cons 'ref-count (if ref-count ref-count 0)))))))
+
+(defun ysrw:coord-inside-span-p (val minv maxv)
+  (and (> val (+ minv *ysrw-geom-tol*))
+       (< val (- maxv *ysrw-geom-tol*))))
+
+(defun ysrw:coord-inside-single-span-p (val span / minv maxv)
+  (setq minv (car span)
+        maxv (cadr span))
+  (and (>= val (- minv *ysrw-row-tol*))
+       (<= val (+ maxv *ysrw-row-tol*))))
+
+(defun ysrw:coord-inside-spans-p (val spans / inside)
+  (foreach span spans
+    (if (ysrw:coord-inside-single-span-p val span)
+      (setq inside T)))
+  inside)
+
+(defun ysrw:sort-unique-values (vals / sorted result)
+  (setq sorted (vl-sort vals '<))
+  (foreach val sorted
+    (if (or (not result)
+            (not (equal val (car result) *ysrw-geom-tol*)))
+      (setq result (cons val result))))
+  (reverse result))
+
+(defun ysrw:row-key (val)
+  (* *ysrw-row-tol* (fix (+ 0.5 (/ val *ysrw-row-tol*)))))
+
+(defun ysrw:add-span-to-bucket (buckets key span / item)
+  (if (setq item (assoc key buckets))
+    (setq buckets
+           (subst
+             (cons key (cons span (cdr item)))
+             item
+             buckets))
+    (setq buckets (cons (cons key (list span)) buckets)))
+  buckets)
+
+(defun ysrw:merge-spans (spans / sorted span current result)
+  (setq sorted
+         (vl-sort
+           spans
+           '(lambda (a b)
+              (< (car a) (car b)))))
+  (foreach span sorted
+    (cond
+      ((not current)
+       (setq current span))
+      ((<= (car span) (+ (cadr current) *ysrw-geom-tol*))
+       (setq current
+              (list
+                (car current)
+                (max (cadr current) (cadr span)))))
+      (T
+       (setq result (cons current result)
+             current span))))
+  (if current
+    (setq result (cons current result)))
+  (reverse result))
+
+(defun ysrw:span-list-length (spans / total)
+  (foreach span spans
+    (setq total (+ (if total total 0.0)
+                   (max 0.0 (- (cadr span) (car span))))))
+  (if total total 0.0))
+
+(defun ysrw:outer-horizontal-row (segments bbox side / minx maxx miny maxy side-len threshold buckets seg y span rows row coord spans merged cover dist best fallback)
+  (setq minx (car (car bbox))
+        maxx (car (cadr bbox))
+        miny (cadr (car bbox))
+        maxy (cadr (cadr bbox))
+        side-len (- maxx minx)
+        threshold (max 1000.0 (* side-len 0.15)))
+  (foreach seg segments
+    (if (= 'horizontal (car seg))
+      (progn
+        (setq y (cadr seg)
+              span (list (caddr seg) (cadddr seg)))
+        (if (> (- (cadr span) (car span)) *ysrw-geom-tol*)
+          (setq buckets (ysrw:add-span-to-bucket buckets (ysrw:row-key y) span))))))
+  (setq rows buckets)
+  (foreach row rows
+    (setq coord (car row)
+          spans (cdr row)
+          merged (ysrw:merge-spans spans)
+          cover (ysrw:span-list-length merged)
+          dist (cond
+                 ((eq side 'top) (- maxy coord))
+                 (T (- coord miny))))
+    (if (or (not fallback)
+            (< dist (car fallback))
+            (and (equal dist (car fallback) *ysrw-row-tol*)
+                 (> cover (cadr fallback))))
+      (setq fallback (list dist cover coord merged)))
+    (if (>= cover threshold)
+      (if (or (not best)
+              (< dist (car best))
+              (and (equal dist (car best) *ysrw-row-tol*)
+                   (> cover (cadr best))))
+        (setq best (list dist cover coord merged)))))
+  (if best
+    (list (caddr best) (cadddr best))
+    (if fallback
+      (list (caddr fallback) (cadddr fallback)))))
+
+(defun ysrw:outer-vertical-row (segments bbox side / minx maxx miny maxy side-len threshold buckets seg x span rows row coord spans merged cover dist best fallback)
+  (setq minx (car (car bbox))
+        maxx (car (cadr bbox))
+        miny (cadr (car bbox))
+        maxy (cadr (cadr bbox))
+        side-len (- maxy miny)
+        threshold (max 1000.0 (* side-len 0.15)))
+  (foreach seg segments
+    (if (= 'vertical (car seg))
+      (progn
+        (setq x (cadr seg)
+              span (list (caddr seg) (cadddr seg)))
+        (if (> (- (cadr span) (car span)) *ysrw-geom-tol*)
+          (setq buckets (ysrw:add-span-to-bucket buckets (ysrw:row-key x) span))))))
+  (setq rows buckets)
+  (foreach row rows
+    (setq coord (car row)
+          spans (cdr row)
+          merged (ysrw:merge-spans spans)
+          cover (ysrw:span-list-length merged)
+          dist (cond
+                 ((eq side 'left) (- coord minx))
+                 (T (- maxx coord))))
+    (if (or (not fallback)
+            (< dist (car fallback))
+            (and (equal dist (car fallback) *ysrw-row-tol*)
+                 (> cover (cadr fallback))))
+      (setq fallback (list dist cover coord merged)))
+    (if (>= cover threshold)
+      (if (or (not best)
+              (< dist (car best))
+              (and (equal dist (car best) *ysrw-row-tol*)
+                   (> cover (cadr best))))
+        (setq best (list dist cover coord merged)))))
+  (if best
+    (list (caddr best) (cadddr best))
+    (if fallback
+      (list (caddr fallback) (cadddr fallback)))))
+
+(defun ysrw:best-horizontal-row (segments bbox side / minx maxx miny maxy side-len threshold buckets seg y span key rows row coord spans merged cover dist best fallback)
+  (setq minx (car (car bbox))
+        maxx (car (cadr bbox))
+        miny (cadr (car bbox))
+        maxy (cadr (cadr bbox))
+        side-len (- maxx minx)
+        threshold (max 1000.0 (* side-len 0.15)))
+  (foreach seg segments
+    (if (= 'horizontal (car seg))
+      (progn
+        (setq y (cadr seg)
+              span (list (caddr seg) (cadddr seg)))
+        (if (and (> (- (cadr span) (car span)) *ysrw-geom-tol*)
+                 (cond
+                   ((eq side 'top) (< y (- maxy *ysrw-geom-tol*)))
+                   ((eq side 'bottom) (> y (+ miny *ysrw-geom-tol*)))))
+          (setq buckets (ysrw:add-span-to-bucket buckets (ysrw:row-key y) span))))))
+  (setq rows buckets)
+  (foreach row rows
+    (setq coord (car row)
+          spans (cdr row)
+          merged (ysrw:merge-spans spans)
+          cover (ysrw:span-list-length merged)
+          dist (cond
+                 ((eq side 'top) (- maxy coord))
+                 (T (- coord miny))))
+    (if (or (not fallback)
+            (< dist (car fallback))
+            (and (equal dist (car fallback) *ysrw-row-tol*)
+                 (> cover (cadr fallback))))
+      (setq fallback (list dist cover coord merged)))
+    (if (>= cover threshold)
+      (if (or (not best)
+              (< dist (car best))
+              (and (equal dist (car best) *ysrw-row-tol*)
+                   (> cover (cadr best))))
+        (setq best (list dist cover coord merged)))))
+  (if best
+    (list (caddr best) (cadddr best))
+    (if fallback
+      (list (caddr fallback) (cadddr fallback)))))
+
+(defun ysrw:inner-horizontal-row (segments bbox side outercoord / minx maxx miny maxy side-len threshold buckets seg y span rows row coord spans merged cover dist best fallback)
+  (setq minx (car (car bbox))
+        maxx (car (cadr bbox))
+        miny (cadr (car bbox))
+        maxy (cadr (cadr bbox))
+        side-len (- maxx minx)
+        threshold (max 1000.0 (* side-len 0.15)))
+  (foreach seg segments
+    (if (= 'horizontal (car seg))
+      (progn
+        (setq y (cadr seg)
+              span (list (caddr seg) (cadddr seg)))
+        (if (and (> (- (cadr span) (car span)) *ysrw-geom-tol*)
+                 (cond
+                   ((eq side 'top)
+                    (and (< y (- outercoord *ysrw-geom-tol*))
+                         (<= (- outercoord y) *ysrw-max-wall-thickness*)))
+                   ((eq side 'bottom)
+                    (and (> y (+ outercoord *ysrw-geom-tol*))
+                         (<= (- y outercoord) *ysrw-max-wall-thickness*)))))
+          (setq buckets (ysrw:add-span-to-bucket buckets (ysrw:row-key y) span))))))
+  (foreach row buckets
+    (setq coord (car row)
+          spans (cdr row)
+          merged (ysrw:merge-spans spans)
+          cover (ysrw:span-list-length merged)
+          dist (abs (- outercoord coord)))
+    (if (or (not fallback)
+            (< dist (car fallback))
+            (and (equal dist (car fallback) *ysrw-row-tol*)
+                 (> cover (cadr fallback))))
+      (setq fallback (list dist cover coord merged)))
+    (if (>= cover threshold)
+      (if (or (not best)
+              (< dist (car best))
+              (and (equal dist (car best) *ysrw-row-tol*)
+                   (> cover (cadr best))))
+        (setq best (list dist cover coord merged)))))
+  (if best
+    (list (caddr best) (cadddr best))
+    (if fallback
+      (list (caddr fallback) (cadddr fallback)))))
+
+(defun ysrw:best-vertical-row (segments bbox side / minx maxx miny maxy side-len threshold buckets seg x span key rows row coord spans merged cover dist best fallback)
+  (setq minx (car (car bbox))
+        maxx (car (cadr bbox))
+        miny (cadr (car bbox))
+        maxy (cadr (cadr bbox))
+        side-len (- maxy miny)
+        threshold (max 1000.0 (* side-len 0.15)))
+  (foreach seg segments
+    (if (= 'vertical (car seg))
+      (progn
+        (setq x (cadr seg)
+              span (list (caddr seg) (cadddr seg)))
+        (if (and (> (- (cadr span) (car span)) *ysrw-geom-tol*)
+                 (cond
+                   ((eq side 'left) (> x (+ minx *ysrw-geom-tol*)))
+                   ((eq side 'right) (< x (- maxx *ysrw-geom-tol*)))))
+          (setq buckets (ysrw:add-span-to-bucket buckets (ysrw:row-key x) span))))))
+  (setq rows buckets)
+  (foreach row rows
+    (setq coord (car row)
+          spans (cdr row)
+          merged (ysrw:merge-spans spans)
+          cover (ysrw:span-list-length merged)
+          dist (cond
+                 ((eq side 'left) (- coord minx))
+                 (T (- maxx coord))))
+    (if (or (not fallback)
+            (< dist (car fallback))
+            (and (equal dist (car fallback) *ysrw-row-tol*)
+                 (> cover (cadr fallback))))
+      (setq fallback (list dist cover coord merged)))
+    (if (>= cover threshold)
+      (if (or (not best)
+              (< dist (car best))
+              (and (equal dist (car best) *ysrw-row-tol*)
+                   (> cover (cadr best))))
+        (setq best (list dist cover coord merged)))))
+  (if best
+    (list (caddr best) (cadddr best))
+    (if fallback
+      (list (caddr fallback) (cadddr fallback)))))
+
+(defun ysrw:inner-vertical-row (segments bbox side outercoord / minx maxx miny maxy side-len threshold buckets seg x span rows row coord spans merged cover dist best fallback)
+  (setq minx (car (car bbox))
+        maxx (car (cadr bbox))
+        miny (cadr (car bbox))
+        maxy (cadr (cadr bbox))
+        side-len (- maxy miny)
+        threshold (max 1000.0 (* side-len 0.15)))
+  (foreach seg segments
+    (if (= 'vertical (car seg))
+      (progn
+        (setq x (cadr seg)
+              span (list (caddr seg) (cadddr seg)))
+        (if (and (> (- (cadr span) (car span)) *ysrw-geom-tol*)
+                 (cond
+                   ((eq side 'left)
+                    (and (> x (+ outercoord *ysrw-geom-tol*))
+                         (<= (- x outercoord) *ysrw-max-wall-thickness*)))
+                   ((eq side 'right)
+                    (and (< x (- outercoord *ysrw-geom-tol*))
+                         (<= (- outercoord x) *ysrw-max-wall-thickness*)))))
+          (setq buckets (ysrw:add-span-to-bucket buckets (ysrw:row-key x) span))))))
+  (foreach row buckets
+    (setq coord (car row)
+          spans (cdr row)
+          merged (ysrw:merge-spans spans)
+          cover (ysrw:span-list-length merged)
+          dist (abs (- outercoord coord)))
+    (if (or (not fallback)
+            (< dist (car fallback))
+            (and (equal dist (car fallback) *ysrw-row-tol*)
+                 (> cover (cadr fallback))))
+      (setq fallback (list dist cover coord merged)))
+    (if (>= cover threshold)
+      (if (or (not best)
+              (< dist (car best))
+              (and (equal dist (car best) *ysrw-row-tol*)
+                   (> cover (cadr best))))
+        (setq best (list dist cover coord merged)))))
+  (if best
+    (list (caddr best) (cadddr best))
+    (if fallback
+      (list (caddr fallback) (cadddr fallback)))))
+
+(defun ysrw:spans-min (spans / val)
+  (foreach span spans
+    (if (or (not val) (< (car span) val))
+      (setq val (car span))))
+  val)
+
+(defun ysrw:spans-max (spans / val)
+  (foreach span spans
+    (if (or (not val) (> (cadr span) val))
+      (setq val (cadr span))))
+  val)
+
+(defun ysrw:vertical-crosses-y-p (seg y)
+  (and (= 'vertical (car seg))
+       (<= (caddr seg) (+ y *ysrw-row-tol*))
+       (>= (cadddr seg) (- y *ysrw-row-tol*))))
+
+(defun ysrw:horizontal-crosses-x-p (seg x)
+  (and (= 'horizontal (car seg))
+       (<= (caddr seg) (+ x *ysrw-row-tol*))
+       (>= (cadddr seg) (- x *ysrw-row-tol*))))
+
+(defun ysrw:vertical-touches-horizontal-row-p (seg y side)
+  (and (= 'vertical (car seg))
+       (cond
+         ((eq side 'top)
+          (<= (abs (- (cadddr seg) y)) *ysrw-row-tol*))
+         (T
+          (<= (abs (- (caddr seg) y)) *ysrw-row-tol*)))))
+
+(defun ysrw:horizontal-touches-vertical-row-p (seg x side)
+  (and (= 'horizontal (car seg))
+       (cond
+         ((eq side 'right)
+          (<= (abs (- (cadddr seg) x)) *ysrw-row-tol*))
+         (T
+          (<= (abs (- (caddr seg) x)) *ysrw-row-tol*)))))
+
+(defun ysrw:vertical-connects-horizontal-row-p (seg y side)
+  (and (= 'vertical (car seg))
+       (<= (caddr seg) (+ y *ysrw-row-tol*))
+       (>= (cadddr seg) (- y *ysrw-row-tol*))
+       (cond
+         ((eq side 'top)
+          (< (caddr seg) (- y *ysrw-row-tol*)))
+         (T
+          (> (cadddr seg) (+ y *ysrw-row-tol*))))))
+
+(defun ysrw:horizontal-connects-vertical-row-p (seg x side)
+  (and (= 'horizontal (car seg))
+       (<= (caddr seg) (+ x *ysrw-row-tol*))
+       (>= (cadddr seg) (- x *ysrw-row-tol*))
+       (cond
+         ((eq side 'right)
+         (< (caddr seg) (- x *ysrw-row-tol*)))
+         (T
+          (> (cadddr seg) (+ x *ysrw-row-tol*))))))
+
+(defun ysrw:vertical-bridges-horizontal-band-p (seg outer inner)
+  (and (= 'vertical (car seg))
+       (<= (caddr seg) (+ inner *ysrw-row-tol*))
+       (>= (cadddr seg) (- outer *ysrw-row-tol*))
+       (<= (- (cadddr seg) (caddr seg))
+           (+ (abs (- outer inner)) (* 2.0 *ysrw-row-tol*)))))
+
+(defun ysrw:horizontal-bridges-vertical-band-p (seg outer inner)
+  (and (= 'horizontal (car seg))
+       (<= (caddr seg) (+ outer *ysrw-row-tol*))
+       (>= (cadddr seg) (- inner *ysrw-row-tol*))
+       (<= (- (cadddr seg) (caddr seg))
+           (+ (abs (- inner outer)) (* 2.0 *ysrw-row-tol*)))))
+
+(defun ysrw:pair-adjacent-values (vals / sorted idx x1 x2 gap result)
+  (setq sorted (ysrw:sort-unique-values vals)
+        idx 0)
+  (while (< idx (1- (length sorted)))
+    (setq x1 (nth idx sorted)
+          x2 (nth (1+ idx) sorted)
+          gap (- x2 x1))
+    (cond
+      ((and (> gap *ysrw-geom-tol*)
+            (<= gap *ysrw-max-wall-thickness*))
+       (setq result (cons (list x1 x2) result)
+             idx (+ idx 2)))
+      (T
+       (setq idx (1+ idx)))))
+  (reverse result))
+
+(defun ysrw:pair-adjacent-values-in-spans (vals spans / span spanvals result)
+  (foreach span spans
+    (setq spanvals nil)
+    (foreach val vals
+      (if (ysrw:coord-inside-single-span-p val span)
+        (setq spanvals (cons val spanvals))))
+    (if spanvals
+      (setq result (append result (ysrw:pair-adjacent-values spanvals)))))
+  result)
+
+(defun ysrw:top-wall-data (segments ref-segments bbox / ref-source outer-row inner-row outer-base coord spans vals seg x)
+  (setq ref-source (if ref-segments ref-segments segments)
+        outer-row (ysrw:outer-horizontal-row segments bbox 'top)
+        inner-row (if outer-row
+                    (ysrw:inner-horizontal-row ref-source bbox 'top (car outer-row))))
+  (if outer-row
+    (progn
+      (setq outer-base (car outer-row))
+      (if inner-row
+        (progn
+          (setq coord (car inner-row)
+                spans (cadr inner-row))
+          (foreach seg segments
+            (if (and (ysrw:vertical-touches-horizontal-row-p seg coord 'top)
+                     (setq x (cadr seg))
+                     (ysrw:coord-inside-spans-p x spans))
+              (setq vals (cons x vals))))))
+      (list
+        (cons 'base outer-base)
+        (cons 'bodies (ysrw:pair-adjacent-values-in-spans vals spans))))))
+
+(defun ysrw:bottom-wall-data (segments ref-segments bbox / ref-source outer-row inner-row outer-base coord spans vals seg x)
+  (setq ref-source (if ref-segments ref-segments segments)
+        outer-row (ysrw:outer-horizontal-row segments bbox 'bottom)
+        inner-row (if outer-row
+                    (ysrw:inner-horizontal-row ref-source bbox 'bottom (car outer-row))))
+  (if outer-row
+    (progn
+      (setq outer-base (car outer-row))
+      (if inner-row
+        (progn
+          (setq coord (car inner-row)
+                spans (cadr inner-row))
+          (foreach seg segments
+            (if (and (ysrw:vertical-touches-horizontal-row-p seg coord 'bottom)
+                     (setq x (cadr seg))
+                     (ysrw:coord-inside-spans-p x spans))
+              (setq vals (cons x vals))))))
+      (list
+        (cons 'base outer-base)
+        (cons 'bodies (ysrw:pair-adjacent-values-in-spans vals spans))))))
+
+(defun ysrw:left-wall-data (segments ref-segments bbox / ref-source outer-row inner-row outer-base coord spans vals seg y)
+  (setq ref-source (if ref-segments ref-segments segments)
+        outer-row (ysrw:outer-vertical-row segments bbox 'left)
+        inner-row (if outer-row
+                    (ysrw:inner-vertical-row ref-source bbox 'left (car outer-row))))
+  (if outer-row
+    (progn
+      (setq outer-base (car outer-row))
+      (if inner-row
+        (progn
+          (setq coord (car inner-row)
+                spans (cadr inner-row))
+          (foreach seg segments
+            (if (and (ysrw:horizontal-touches-vertical-row-p seg coord 'left)
+                     (setq y (cadr seg))
+                     (ysrw:coord-inside-spans-p y spans))
+              (setq vals (cons y vals))))))
+      (list
+        (cons 'base outer-base)
+        (cons 'bodies (ysrw:pair-adjacent-values-in-spans vals spans))))))
+
+(defun ysrw:right-wall-data (segments ref-segments bbox / ref-source outer-row inner-row outer-base coord spans vals seg y)
+  (setq ref-source (if ref-segments ref-segments segments)
+        outer-row (ysrw:outer-vertical-row segments bbox 'right)
+        inner-row (if outer-row
+                    (ysrw:inner-vertical-row ref-source bbox 'right (car outer-row))))
+  (if outer-row
+    (progn
+      (setq outer-base (car outer-row))
+      (if inner-row
+        (progn
+          (setq coord (car inner-row)
+                spans (cadr inner-row))
+          (foreach seg segments
+            (if (and (ysrw:horizontal-touches-vertical-row-p seg coord 'right)
+                     (setq y (cadr seg))
+                     (ysrw:coord-inside-spans-p y spans))
+              (setq vals (cons y vals))))))
+      (list
+        (cons 'base outer-base)
+        (cons 'bodies (ysrw:pair-adjacent-values-in-spans vals spans))))))
 
 (defun ysrw:current-space (doc)
   (if (= 1 (getvar "CVPORT"))
     (vla-get-PaperSpace doc)
     (vla-get-ModelSpace doc)))
 
-(defun ysrw:room-dim-offset (room)
-  (min *ysrw-dim-offset-max*
-       (max *ysrw-dim-offset-min*
-            (* 0.18 (cdr (assoc 'height room))))))
+(defun ysrw:add-rotated-dim (space p1 p2 dimpt angle)
+  (vla-AddDimRotated
+    space
+    (vlax-3d-point (ysrw:3dpt p1))
+    (vlax-3d-point (ysrw:3dpt p2))
+    (vlax-3d-point (ysrw:3dpt dimpt))
+    angle))
 
-(defun ysrw:add-room-width-dim (space room / bbox minpt maxpt midx midy dimy obj)
-  (setq bbox (cdr (assoc 'bbox room))
-        minpt (car bbox)
+(defun ysrw:add-horizontal-chain (space xvals basey dimy / idx x1 x2)
+  (setq idx 0)
+  (while (< idx (1- (length xvals)))
+    (setq x1 (nth idx xvals)
+          x2 (nth (1+ idx) xvals))
+    (if (> (abs (- x2 x1)) *ysrw-geom-tol*)
+      (ysrw:add-rotated-dim
+        space
+        (list x1 basey 0.0)
+        (list x2 basey 0.0)
+        (list (/ (+ x1 x2) 2.0) dimy 0.0)
+        0.0))
+    (setq idx (1+ idx))))
+
+(defun ysrw:add-vertical-chain (space yvals basex dimx / idx y1 y2)
+  (setq idx 0)
+  (while (< idx (1- (length yvals)))
+    (setq y1 (nth idx yvals)
+          y2 (nth (1+ idx) yvals))
+    (if (> (abs (- y2 y1)) *ysrw-geom-tol*)
+      (ysrw:add-rotated-dim
+        space
+        (list basex y1 0.0)
+        (list basex y2 0.0)
+        (list dimx (/ (+ y1 y2) 2.0) 0.0)
+        (/ pi 2.0)))
+    (setq idx (1+ idx))))
+
+(defun ysrw:add-overall-horizontal (space minx maxx basey dimy)
+  (ysrw:add-rotated-dim
+    space
+    (list minx basey 0.0)
+    (list maxx basey 0.0)
+    (list (/ (+ minx maxx) 2.0) dimy 0.0)
+    0.0))
+
+(defun ysrw:add-overall-vertical (space miny maxy basex dimx)
+  (ysrw:add-rotated-dim
+    space
+    (list basex miny 0.0)
+    (list basex maxy 0.0)
+    (list dimx (/ (+ miny maxy) 2.0) 0.0)
+    (/ pi 2.0)))
+
+(defun ysrw:add-horizontal-wall-bodies (space bodies base dimy / body)
+  (foreach body bodies
+    (ysrw:add-rotated-dim
+      space
+      (list (car body) base 0.0)
+      (list (cadr body) base 0.0)
+      (list (/ (+ (car body) (cadr body)) 2.0) dimy 0.0)
+      0.0)))
+
+(defun ysrw:add-vertical-wall-bodies (space bodies base dimx / body)
+  (foreach body bodies
+    (ysrw:add-rotated-dim
+      space
+      (list base (car body) 0.0)
+      (list base (cadr body) 0.0)
+      (list dimx (/ (+ (car body) (cadr body)) 2.0) 0.0)
+      (/ pi 2.0))))
+
+(defun ysrw:add-side-dims (space bbox segments ref-segments / minpt maxpt minx miny maxx maxy row total side-data bodies base created)
+  (setq minpt (car bbox)
         maxpt (cadr bbox)
-        midx (/ (+ (car minpt) (car maxpt)) 2.0)
-        midy (/ (+ (cadr minpt) (cadr maxpt)) 2.0)
-        dimy (+ midy (ysrw:room-dim-offset room)))
-  (setq obj
-         (vla-AddDimRotated
-           space
-           (vlax-3d-point (list (car minpt) midy 0.0))
-           (vlax-3d-point (list (car maxpt) midy 0.0))
-            (vlax-3d-point (list midx dimy 0.0))
-            0.0))
-  obj)
+        minx (car minpt)
+        miny (cadr minpt)
+        maxx (car maxpt)
+        maxy (cadr maxpt)
+        row *ysrw-side-dim-offset*
+        total (+ *ysrw-side-dim-offset* *ysrw-total-dim-gap*)
+        created 0)
 
-(defun ysrw:room-minpt (room)
-  (car (cdr (assoc 'bbox room))))
+  (setq side-data (ysrw:top-wall-data segments ref-segments bbox)
+        bodies (if side-data (cdr (assoc 'bodies side-data))))
+  (if side-data
+    (progn
+      (if bodies
+        (ysrw:add-horizontal-wall-bodies space bodies maxy (+ maxy row)))
+      (ysrw:add-overall-horizontal space minx maxx maxy (+ maxy total))
+      (setq created (+ created (length bodies) 1))))
 
-(defun ysrw:sort-rooms (rooms)
-  (vl-sort
-    rooms
-    '(lambda (a b)
-       (if (equal (cadr (ysrw:room-minpt a))
-                  (cadr (ysrw:room-minpt b))
-                  1e-6)
-         (< (car (ysrw:room-minpt a))
-            (car (ysrw:room-minpt b)))
-         (> (cadr (ysrw:room-minpt a))
-            (cadr (ysrw:room-minpt b)))))))
+  (setq side-data (ysrw:bottom-wall-data segments ref-segments bbox)
+        bodies (if side-data (cdr (assoc 'bodies side-data))))
+  (if side-data
+    (progn
+      (if bodies
+        (ysrw:add-horizontal-wall-bodies space bodies miny (- miny row)))
+      (ysrw:add-overall-horizontal space minx maxx miny (- miny total))
+      (setq created (+ created (length bodies) 1))))
+
+  (setq side-data (ysrw:left-wall-data segments ref-segments bbox)
+        bodies (if side-data (cdr (assoc 'bodies side-data))))
+  (if side-data
+    (progn
+      (if bodies
+        (ysrw:add-vertical-wall-bodies space bodies minx (- minx row)))
+      (ysrw:add-overall-vertical space miny maxy minx (- minx total))
+      (setq created (+ created (length bodies) 1))))
+
+  (setq side-data (ysrw:right-wall-data segments ref-segments bbox)
+        bodies (if side-data (cdr (assoc 'bodies side-data))))
+  (if side-data
+    (progn
+      (if bodies
+        (ysrw:add-vertical-wall-bodies space bodies maxx (+ maxx row)))
+      (ysrw:add-overall-vertical space miny maxy maxx (+ maxx total))
+      (setq created (+ created (length bodies) 1))))
+
+  created)
 
 (defun ysrw:end-undo (doc)
   (if doc
     (vl-catch-all-apply 'vla-EndUndoMark (list doc))))
 
-(defun ysrw:run (/ *error* olderr doc space rooms count)
+(defun ysrw:run (/ *error* olderr doc space wall-data bbox segments ref-segments created)
   (setq doc (vla-get-ActiveDocument (vlax-get-acad-object))
         space (ysrw:current-space doc)
         olderr *error*)
@@ -339,19 +858,28 @@
       (princ (strcat "\nError: " msg)))
     (princ))
   (vla-StartUndoMark doc)
-  (setq rooms (ysrw:sort-rooms (ysrw:collect-room-candidates)))
+  (setq wall-data (ysrw:collect-wall-data))
   (cond
-    ((not rooms)
-     (princ "\nNo orthogonal closed room polylines found."))
+    ((not wall-data)
+     (princ "\nNo white LINE/LWPOLYLINE/POLYLINE wall geometry found in the current selection or drawing."))
     (T
-     (foreach room rooms
-       (if (ysrw:add-room-width-dim space room)
-         (setq count (1+ (if count count 0)))))
+     (setq bbox (cdr (assoc 'bbox wall-data))
+           segments (cdr (assoc 'segments wall-data))
+           ref-segments (cdr (assoc 'ref-segments wall-data))
+           created (ysrw:add-side-dims space bbox segments ref-segments))
      (princ
        (strcat
-         "\nRoom width dimensions created: "
-         (itoa (if count count 0))
-         ". Uses current dimstyle and current layer."))))
+         "\nExterior opening dimensions created around 4 sides. Wall objects used: "
+         (itoa (cdr (assoc 'count wall-data)))
+         ", white reference walls: "
+         (itoa (cdr (assoc 'ref-count wall-data)))
+         ", dimensions created: "
+         (itoa created)
+         ". Offset: "
+         (rtos *ysrw-side-dim-offset* 2 0)
+         ", overall gap: "
+         (rtos *ysrw-total-dim-gap* 2 0)
+         "."))))
   (ysrw:end-undo doc)
   (setq *error* olderr)
   (princ))
@@ -362,5 +890,5 @@
 (defun c:YROOMW ()
   (ysrw:run))
 
-(princ "\nYS room width loaded. Commands: YKJ, YROOMW.")
+(princ "\nYS wall dimension loaded. Commands: YKJ, YROOMW.")
 (princ)

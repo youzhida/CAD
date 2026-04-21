@@ -4,7 +4,7 @@ This folder contains a small AutoLISP command pack for AutoCAD-compatible CAD to
 
 Files:
 - `ys_tools.lsp`: main command file
-- `ys_room_width.lsp`: all-room width dimension helper
+- `ys_room_width.lsp`: 4-side exterior wall opening dimension helper
 
 Commands:
 - `Q`: restyles selected furniture geometry to yellow outer lines + red `__DASH` inner lines
@@ -43,5 +43,10 @@ If you want a different cabinet split rule later, change this line in `ys_tools.
 Room width helper:
 - Load `ys_room_width.lsp`
 - Run `YKJ` or `YROOMW`
-- The script scans the whole drawing for orthogonal closed room polylines and adds one horizontal interior width dimension to each room
+- The script uses the current selection, or the whole drawing if nothing is selected
+- It filters to white wall `LINE` / `LWPOLYLINE` / `POLYLINE` objects
+- It places the first dimension row from the outermost wall line on each side
+- It looks for the nearest inner parallel row within the wall-thickness threshold and only pairs wall faces inside each row span
+- Wall-body pairing is limited by `*ysrw-max-wall-thickness*` in `ys_room_width.lsp`
+- The first dimension row is offset `700` from the exterior wall, and the overall dimension row is another `700` farther out
 - It uses the current dimstyle and current layer
