@@ -603,8 +603,7 @@
                    ((ys:polyline-has-bulge-p ename) 'rounded)))
       (if (and kind
                (> span 1.0)
-               (> depth 1.0)
-               (> span (+ depth (max 10.0 (* depth 0.1)))))
+               (> depth 1.0))
         (list
           (cons 'kind kind)
           (cons 'layer layer)
