@@ -1,6 +1,7 @@
 (vl-load-com)
 
 (setq *ysrw-geom-tol* 1.0
+      *ysrw-witness-gap* 400.0
       *ysrw-side-dim-offset* 900.0
       *ysrw-total-dim-gap* 700.0)
 
@@ -142,6 +143,14 @@
     ((eq side 'left) (car (car bbox)))
     (T (car (cadr bbox)))))
 
+(defun ysrw:witness-base-from-bbox (bbox side / base)
+  (setq base (ysrw:outer-base-from-bbox bbox side))
+  (cond
+    ((eq side 'top) (+ base *ysrw-witness-gap*))
+    ((eq side 'bottom) (- base *ysrw-witness-gap*))
+    ((eq side 'left) (- base *ysrw-witness-gap*))
+    (T (+ base *ysrw-witness-gap*))))
+
 (defun ysrw:add-horizontal-chain (space xvals basey dimy / idx x1 x2)
   (setq idx 0)
   (while (< idx (1- (length xvals)))
@@ -186,11 +195,12 @@
     (list dimx (/ (+ miny maxy) 2.0) 0.0)
     (/ pi 2.0)))
 
-(defun ysrw:add-side-dims (space pts side bbox / coords base row total first lastv created)
+(defun ysrw:add-side-dims (space pts side bbox / coords base witness-base row total first lastv created)
   (setq coords (ysrw:point-axis-values pts side))
   (if (>= (length coords) 2)
     (progn
       (setq base (ysrw:outer-base-from-bbox bbox side)
+            witness-base (ysrw:witness-base-from-bbox bbox side)
             first (car coords)
             lastv (ysrw:last-item coords)
             row (cond
@@ -205,11 +215,11 @@
                     (T (+ row *ysrw-total-dim-gap*))))
       (cond
         ((member side '(top bottom))
-         (ysrw:add-horizontal-chain space coords base row)
-         (ysrw:add-overall-horizontal space first lastv base total))
+         (ysrw:add-horizontal-chain space coords witness-base row)
+         (ysrw:add-overall-horizontal space first lastv witness-base total))
         (T
-         (ysrw:add-vertical-chain space coords base row)
-         (ysrw:add-overall-vertical space first lastv base total)))
+         (ysrw:add-vertical-chain space coords witness-base row)
+         (ysrw:add-overall-vertical space first lastv witness-base total)))
       (setq created (length coords))
       created)))
 
@@ -267,6 +277,8 @@
            (itoa side-count)
            ", dimensions created: "
            (itoa total-created)
+           ", witness gap: "
+           (rtos *ysrw-witness-gap* 2 0)
            ", first offset: "
            (rtos *ysrw-side-dim-offset* 2 0)
            ", total gap: "
