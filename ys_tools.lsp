@@ -405,6 +405,32 @@
           idx (1+ idx)))
   (reverse result))
 
+(defun ys:enames-after (start-ename / next result)
+  (setq next
+         (if start-ename
+           (entnext start-ename)
+           (entnext)))
+  (while next
+    (setq result (append result (list next))
+          next (entnext next)))
+  result)
+
+(defun ys:enames->object-array (enames / arr ename idx obj objs)
+  (foreach ename enames
+    (if (and ename (entget ename))
+      (progn
+        (setq obj (vl-catch-all-apply 'vlax-ename->vla-object (list ename)))
+        (if (not (vl-catch-all-error-p obj))
+          (setq objs (append objs (list obj)))))))
+  (if objs
+    (progn
+      (setq arr (vlax-make-safearray vlax-vbObject (cons 0 (1- (length objs))))
+            idx 0)
+      (foreach obj objs
+        (vlax-safearray-put-element arr idx obj)
+        (setq idx (1+ idx)))
+      arr)))
+
 (defun ys:delete-ss (ss / idx)
   (setq idx 0)
   (while (< idx (sslength ss))
@@ -450,6 +476,25 @@
 (defun ys:regen (doc)
   (if doc
     (vl-catch-all-apply 'vla-Regen (list doc 1))))
+
+(defun ys:move-enames-to-bottom (doc enames / acad dict result sortents space objects)
+  (if (and doc (setq objects (ys:enames->object-array enames)))
+    (progn
+      (setq acad (vlax-get-acad-object)
+            space (ys:current-space doc)
+            dict (vl-catch-all-apply 'vla-GetExtensionDictionary (list space)))
+      (if (not (vl-catch-all-error-p dict))
+        (progn
+          (setq sortents (vl-catch-all-apply 'vla-GetObject (list dict "ACAD_SORTENTS")))
+          (if (vl-catch-all-error-p sortents)
+            (setq sortents (vl-catch-all-apply 'vla-AddObject (list dict "ACAD_SORTENTS" "AcDbSortentsTable"))))
+          (if (not (vl-catch-all-error-p sortents))
+            (progn
+              (setq result (vl-catch-all-apply 'vla-MoveToBottom (list sortents objects)))
+              (if (not (vl-catch-all-error-p result))
+                (progn
+                  (vl-catch-all-apply 'vla-Update (list acad))
+                  T)))))))))
 
 (defun ys:rectangle-data-from-points (pts layer / v1 v2 v3 v4 l1 l2 l3 l4 tol edge-a0 edge-a1 edge-b0 edge-b1)
   (if (/= 4 (length pts))
@@ -1005,7 +1050,7 @@
     nil
     T))
 
-(defun c:R (/ *error* olderr doc ename data count)
+(defun c:R (/ *error* olderr doc ename data count start-ename created-enames)
   (setq doc (vla-get-ActiveDocument (vlax-get-acad-object))
         olderr *error*)
   (defun *error* (msg)
@@ -1017,6 +1062,7 @@
   (vla-StartUndoMark doc)
   (ys:apply-linetype-standards)
   (setq ename (ys:entity-or-prompt "\nSelect a closed straight cabinet polyline: "))
+  (setq start-ename (entlast))
   (cond
     ((not ename)
      (princ "\nNothing selected."))
@@ -1025,10 +1071,13 @@
      ((not (setq count (ys:draw-straight-cabinet ename data)))
       (princ "\nFailed to generate cabinet layout."))
      (T
-      (ys:style-outer-entity ename)
-      (princ
-        (strcat
-          "\nCabinet layout created. Panels: "
+       (ys:style-outer-entity ename)
+       (setq created-enames (ys:enames-after start-ename))
+       (if (not (ys:move-enames-to-bottom doc (append (list ename) created-enames)))
+         (princ "\nWarning: failed to move cabinet lines to bottom."))
+       (princ
+         (strcat
+           "\nCabinet layout created. Panels: "
          (itoa count)
          ". Step = "
          (rtos *ys-cabinet-target-width* 2 2)))))
