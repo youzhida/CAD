@@ -19,6 +19,7 @@ How to load:
 
 Current behavior:
 - Loading this file overrides only the single-letter commands `Q`, `P`, `B`, and `R`
+- With room label text selected, typing an integer from `1` to `999` resizes and centers it; yellow text height is `1.2 * number`, red text height is `0.85 * number`
 - `R` only supports closed straight cabinet outlines
 - `R` supports ordinary right-angle rectangles
 - `R` also supports straight rounded-end / half-arc cabinet outlines

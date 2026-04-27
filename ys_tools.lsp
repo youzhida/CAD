@@ -6,6 +6,10 @@
       *ys-geom-tol* 1.0
       *ys-furniture-outer-color* 2
       *ys-furniture-inner-color* 1
+      *ys-room-label-yellow-scale* 1.2
+      *ys-room-label-red-scale* 0.85
+      *ys-ac-alignment-middle-center* 10
+      *ys-ac-attachment-middle-center* 5
       *ys-furniture-inner-linetype* "__DASH"
       *ys-furniture-inner-ltscale* 1.0
       *ys-global-ltscale* 400.0
@@ -224,6 +228,14 @@
   (if minpt
     (list minpt maxpt)))
 
+(defun ys:bbox-center (bbox / pmin pmax)
+  (setq pmin (car bbox)
+        pmax (cadr bbox))
+  (list
+    (/ (+ (car pmin) (car pmax)) 2.0)
+    (/ (+ (cadr pmin) (cadr pmax)) 2.0)
+    (/ (+ (caddr pmin) (caddr pmax)) 2.0)))
+
 (defun ys:range-overlap-size (a1 a2 b1 b2)
   (max 0.0
        (- (min a2 b2)
@@ -257,6 +269,10 @@
 (defun ys:vla-blockref-p (obj)
   (= "AcDbBlockReference" (ys:vla-object-name obj)))
 
+(defun ys:vla-text-object-p (obj / kind)
+  (setq kind (ys:vla-object-name obj))
+  (member kind '("AcDbText" "AcDbMText" "AcDbAttributeReference" "AcDbAttributeDefinition")))
+
 (defun ys:vla-bbox (obj / pmin pmax)
   (if obj
     (progn
@@ -264,6 +280,14 @@
       (list
         (vlax-safearray->list pmin)
         (vlax-safearray->list pmax)))))
+
+(defun ys:safe-vla-bbox (obj / result)
+  (if obj
+    (progn
+      (setq result (vl-catch-all-apply 'ys:vla-bbox (list obj)))
+      (if (vl-catch-all-error-p result)
+        nil
+        result))))
 
 (defun ys:set-vla-style (obj color linetype)
   (if obj
@@ -446,6 +470,338 @@
     (setq result (cons (vlax-safearray-get-element arr idx) result)
           idx (1+ idx)))
   (reverse result))
+
+(defun ys:layer-aci-color (layer / data color)
+  (if (and layer (setq data (tblsearch "LAYER" layer)))
+    (progn
+      (setq color (cdr (assoc 62 data)))
+      (if color (abs color)))))
+
+(defun ys:vla-effective-aci-color (obj / color layer)
+  (if (and obj (vlax-property-available-p obj 'Color))
+    (progn
+      (setq color (vla-get-Color obj))
+      (cond
+        ((= color 256)
+         (if (and (vlax-property-available-p obj 'Layer)
+                  (setq layer (vla-get-Layer obj)))
+           (ys:layer-aci-color layer)))
+        ((= color 0) nil)
+        (T (abs color))))))
+
+(defun ys:room-label-height-for-color (color base)
+  (if color
+    (cond
+      ((= color *ys-furniture-outer-color*) (* base *ys-room-label-yellow-scale*))
+      ((= color *ys-furniture-inner-color*) (* base *ys-room-label-red-scale*)))))
+
+(defun ys:mtext-height-code (height)
+  (strcat "\\H" (rtos height 2 6) ";"))
+
+(defun ys:strip-mtext-room-label-format-codes (txt / idx len next out semi)
+  (setq idx 1
+        len (strlen txt)
+        out "")
+  (while (<= idx len)
+    (if (and (< idx len) (= "\\" (substr txt idx 1)))
+      (progn
+        (setq next (substr txt (1+ idx) 1))
+        (cond
+          ((or (= "H" (strcase next))
+               (= "p" next))
+           (setq semi (vl-string-search ";" txt (1- idx)))
+           (if semi
+             (setq idx (+ semi 2))
+             (setq idx (1+ len))))
+          (T
+           (setq out (strcat out (substr txt idx 1))
+                 idx (1+ idx)))))
+      (setq out (strcat out (substr txt idx 1))
+            idx (1+ idx))))
+  out)
+
+(defun ys:mtext-center-paragraphs (txt / idx len out)
+  (setq idx 1
+        len (strlen txt)
+        out "\\pxqc;")
+  (while (<= idx len)
+    (if (and (< idx len)
+             (= "\\" (substr txt idx 1))
+             (= "P" (substr txt (1+ idx) 1)))
+      (setq out (strcat out "\\P\\pxqc;")
+            idx (+ idx 2))
+      (setq out (strcat out (substr txt idx 1))
+            idx (1+ idx))))
+  out)
+
+(defun ys:mtext-color-code-at (txt idx / code color color-text len semi)
+  (setq len (strlen txt))
+  (if (and (< idx len)
+           (= "\\" (substr txt idx 1))
+           (= "C" (strcase (substr txt (1+ idx) 1))))
+    (progn
+      (setq semi (vl-string-search ";" txt (1- idx)))
+      (if semi
+        (progn
+          (setq color-text (substr txt (+ idx 2) (- semi idx 1))
+                color (atoi color-text)
+                code (substr txt idx (+ (- semi idx) 2)))
+          (list color code (+ semi 2)))))))
+
+(defun ys:mtext-room-label-string-for-base (obj base / clean code color formatted height idx info len next out result text)
+  (if (and obj (= "AcDbMText" (ys:vla-object-name obj)))
+    (progn
+      (setq result (vl-catch-all-apply 'vla-get-TextString (list obj)))
+      (if (not (vl-catch-all-error-p result))
+        (progn
+          (setq text result
+                clean (ys:strip-mtext-room-label-format-codes text)
+                idx 1
+                len (strlen clean)
+                out "")
+          (while (<= idx len)
+            (setq info (ys:mtext-color-code-at clean idx))
+            (if info
+              (progn
+                (setq color (car info)
+                      code (cadr info)
+                      next (caddr info)
+                      height (ys:room-label-height-for-color color base)
+                      out (strcat out code))
+                (if height
+                  (setq out (strcat out (ys:mtext-height-code height))
+                        formatted T))
+                (setq idx next))
+              (setq out (strcat out (substr clean idx 1))
+                    idx (1+ idx))))
+          (if formatted (ys:mtext-center-paragraphs out)))))))
+
+(defun ys:mtext-entget (obj / ename result)
+  (if obj
+    (progn
+      (setq result (vl-catch-all-apply 'vlax-vla-object->ename (list obj)))
+      (if (not (vl-catch-all-error-p result))
+        (progn
+          (setq ename result)
+          (entget ename))))))
+
+(defun ys:mtext-insertion-point (obj / data pt)
+  (setq data (ys:mtext-entget obj)
+        pt (cdr (assoc 10 data)))
+  (if pt
+    (ys:3dpt pt)))
+
+(defun ys:mtext-actual-width (obj / data width)
+  (setq data (ys:mtext-entget obj)
+        width (cdr (assoc 42 data)))
+  (if (and width (> width 1e-9))
+    (float width)))
+
+(defun ys:mtext-tighten-width (obj / actual height result width)
+  (setq actual (ys:mtext-actual-width obj))
+  (if actual
+    (progn
+      (setq result (vl-catch-all-apply 'vla-get-Height (list obj))
+            height (if (vl-catch-all-error-p result) 0.0 (float result))
+            width (+ actual (* height 0.5))
+            result (vl-catch-all-apply 'vla-put-Width (list obj width)))
+      (not (vl-catch-all-error-p result)))
+    T))
+
+(defun ys:room-label-text-items-from-object (obj / attrs bbox item item-items result)
+  (cond
+    ((ys:vla-text-object-p obj)
+     (if (setq bbox (ys:safe-vla-bbox obj))
+       (list (cons obj bbox))))
+    ((and (ys:vla-blockref-p obj)
+          (vlax-property-available-p obj 'HasAttributes)
+          (= :vlax-true (vla-get-HasAttributes obj)))
+     (setq attrs (vl-catch-all-apply 'vla-GetAttributes (list obj)))
+     (if (not (vl-catch-all-error-p attrs))
+       (foreach item (ys:variant-object-list attrs)
+         (setq item-items (ys:room-label-text-items-from-object item))
+         (if item-items
+           (setq result (append result item-items)))))
+     result)))
+
+(defun ys:room-label-selection-items (ss / idx ename obj item-items items skipped)
+  (setq idx 0)
+  (while (< idx (sslength ss))
+    (setq ename (ssname ss idx)
+          obj (vl-catch-all-apply 'vlax-ename->vla-object (list ename)))
+    (if (vl-catch-all-error-p obj)
+      (setq skipped (1+ (if skipped skipped 0)))
+      (progn
+        (setq item-items (ys:room-label-text-items-from-object obj))
+        (if item-items
+          (setq items (append items item-items))
+          (setq skipped (1+ (if skipped skipped 0))))))
+    (setq idx (1+ idx)))
+  (list items (if skipped skipped 0)))
+
+(defun ys:room-label-items-bbox (items / item bbox total)
+  (foreach item items
+    (setq bbox (cdr item)
+          total (if total (ys:bbox-union total bbox) bbox)))
+  total)
+
+(defun ys:room-label-target-items-bbox (items / item bbox total)
+  (foreach item items
+    (setq bbox (cadr item)
+          total (if total (ys:bbox-union total bbox) bbox)))
+  total)
+
+(defun ys:room-label-center-point (bbox center-x / center)
+  (setq center (ys:bbox-center bbox))
+  (list center-x (cadr center) (caddr center)))
+
+(defun ys:move-vla-center-to (obj target / bbox center result)
+  (if (and obj target (setq bbox (ys:safe-vla-bbox obj)))
+    (progn
+      (setq center (ys:bbox-center bbox)
+            result (vl-catch-all-apply 'vla-Move (list obj (vlax-3d-point center) (vlax-3d-point target))))
+      (not (vl-catch-all-error-p result)))))
+
+(defun ys:apply-room-label-text (obj bbox center-x height formatted / alignpt kind result ok)
+  (setq kind (ys:vla-object-name obj))
+  (if (or height formatted)
+    (progn
+      (setq alignpt
+             (if (= kind "AcDbMText")
+               (or (ys:mtext-insertion-point obj)
+                   (ys:room-label-center-point bbox center-x))
+               (ys:room-label-center-point bbox center-x))
+            ok T
+            result nil)
+      (if height
+        (progn
+          (setq result (vl-catch-all-apply 'vla-put-Height (list obj height)))
+          (if (vl-catch-all-error-p result)
+            (setq ok nil))))
+      (if formatted
+        (progn
+          (setq result (vl-catch-all-apply 'vla-put-TextString (list obj formatted)))
+          (if (vl-catch-all-error-p result)
+            (setq ok nil))))
+      (cond
+        ((or (= kind "AcDbText")
+             (= kind "AcDbAttributeReference")
+             (= kind "AcDbAttributeDefinition"))
+         (setq result (vl-catch-all-apply 'vla-put-Alignment (list obj *ys-ac-alignment-middle-center*)))
+         (if (vl-catch-all-error-p result)
+           (setq ok nil))
+         (setq result (vl-catch-all-apply 'vla-put-TextAlignmentPoint (list obj (vlax-3d-point alignpt))))
+         (if (vl-catch-all-error-p result)
+           (setq ok nil)))
+        ((= kind "AcDbMText")
+         (setq result (vl-catch-all-apply 'vla-put-AttachmentPoint (list obj *ys-ac-attachment-middle-center*)))
+         (if (vl-catch-all-error-p result)
+           (setq ok nil))
+         (if ok
+           (progn
+             (vl-catch-all-apply 'vla-Update (list obj))
+             (if (not (ys:mtext-tighten-width obj))
+               (setq ok nil))))
+         (setq result (vl-catch-all-apply 'vla-put-InsertionPoint (list obj (vlax-3d-point alignpt))))
+         (if (vl-catch-all-error-p result)
+           (setq ok nil))))
+      (if ok
+        (progn
+          (vl-catch-all-apply 'vla-Update (list obj))
+          (if (and (/= kind "AcDbMText")
+                   (not (ys:move-vla-center-to obj alignpt)))
+            (setq ok nil))
+          (vl-catch-all-apply 'vla-Update (list obj))
+          ok)))))
+
+(defun ys:apply-room-label-texts (ss base / result items unsupported target-items ignored failed changed item obj bbox color formatted height total-bbox center-x)
+  (setq result (ys:room-label-selection-items ss)
+        items (car result)
+        unsupported (cadr result))
+  (foreach item items
+    (setq obj (car item)
+          bbox (cdr item)
+          color (ys:vla-effective-aci-color obj)
+          height (ys:room-label-height-for-color color base)
+          formatted (ys:mtext-room-label-string-for-base obj base))
+    (if (or height formatted)
+      (setq target-items (append target-items (list (list obj bbox height formatted))))
+      (setq ignored (1+ (if ignored ignored 0)))))
+  (if target-items
+    (progn
+      (setq total-bbox (ys:room-label-target-items-bbox target-items)
+            center-x (car (ys:bbox-center total-bbox)))
+      (foreach item target-items
+        (setq obj (nth 0 item)
+              bbox (nth 1 item)
+              height (nth 2 item)
+              formatted (nth 3 item))
+        (if (ys:apply-room-label-text obj bbox center-x height formatted)
+          (setq changed (1+ (if changed changed 0)))
+          (setq failed (1+ (if failed failed 0)))))))
+  (list
+    (if changed changed 0)
+    unsupported
+    (if ignored ignored 0)
+    (if failed failed 0)))
+
+(defun ys:implied-selection (/ result)
+  (setq result (vl-catch-all-apply 'ssgetfirst nil))
+  (cond
+    ((and (not (vl-catch-all-error-p result))
+          result
+          (cadr result))
+     (cadr result))
+    ((and (not (vl-catch-all-error-p result))
+          result
+          (car result))
+     (car result))
+    ((ssget "_I"))))
+
+(defun ys:apply-room-label-number-command (base / doc ss result changed unsupported ignored failed)
+  (setq ss (ys:implied-selection))
+  (if ss
+    (progn
+      (setq doc (vla-get-ActiveDocument (vlax-get-acad-object)))
+      (vla-StartUndoMark doc)
+      (setq result (ys:apply-room-label-texts ss base)
+            changed (nth 0 result)
+            unsupported (nth 1 result)
+            ignored (nth 2 result)
+            failed (nth 3 result))
+      (ys:end-undo doc)
+      (if (> failed 0)
+        (princ
+          (strcat
+            "\nRoom label text partially failed. Base: "
+            (rtos base 2 2)
+            ", changed: "
+            (itoa changed)
+            (if (> unsupported 0)
+              (strcat ", unsupported: " (itoa unsupported))
+              "")
+            (if (> ignored 0)
+              (strcat ", ignored color: " (itoa ignored))
+              "")
+            (if (> failed 0)
+              (strcat ", failed: " (itoa failed))
+              "")))))))
+
+(defun ys:define-room-label-number-command (num / sym)
+  (setq sym (read (strcat "C:" (itoa num))))
+  (eval
+    (list
+      'defun
+      sym
+      '()
+      (list 'ys:apply-room-label-number-command (float num))
+      '(princ))))
+
+(defun ys:install-room-label-number-commands (/ num)
+  (setq num 1)
+  (while (<= num 999)
+    (vl-catch-all-apply 'ys:define-room-label-number-command (list num))
+    (setq num (1+ num))))
 
 (defun ys:current-space (doc)
   (if (= 1 (getvar "CVPORT"))
@@ -1185,5 +1541,6 @@
   (setq *error* olderr)
   (princ))
 
-(princ "\nYS CAD tools loaded. Commands: Q, P, B, R.")
+(ys:install-room-label-number-commands)
+(princ "\nYS CAD tools loaded. Commands: Q, P, B, R. Room label: select text, type 1-999.")
 (princ)
